@@ -9,6 +9,9 @@
 #include <pthread.h>
 
 #define PORT_NUM 1004
+#define NAME_LEN 32
+#define MAX_CLIENTS 10
+#define MSG_LEN 512
 
 void error(const char *msg)
 {
@@ -17,39 +20,122 @@ void error(const char *msg)
 }
 
 typedef struct _ThreadArgs {
-	int clisockfd;
+	int clisockfd; 
+	char name[NAME_LEN]; // storing of username
+	int color; // Ansi color code
 } ThreadArgs;
 
-void* thread_main(void* args)
+//client list and mutex
+static client_t *clients[MAX_CLIENTS] = {0};
+static pthread_mutex_t clients_mtx = PTHREAD_MUTEX_INITIALIZER;
+
+void broadcast(const char *msg) //broadcasting a message to all clients
 {
-	// make sure thread resources are deallocated upon return
-	pthread_detach(pthread_self());
-
-	// get socket descriptor from argument
-	int clisockfd = ((ThreadArgs*) args)->clisockfd;
-	free(args);
-
-	//-------------------------------
-	// Now, we receive/send messages
-	char buffer[256];
-	int nsen, nrcv;
-
-	nrcv = recv(clisockfd, buffer, 256, 0);
-	if (nrcv < 0) error("ERROR recv() failed");
-
-	while (nrcv > 0) {
-		nsen = send(clisockfd, buffer, nrcv, 0);
-		if (nsen != nrcv) error("ERROR send() failed");
-
-		nrcv = recv(clisockfd, buffer, 256, 0);
-		if (nrcv < 0) error("ERROR recv() failed");
+	pthread_mutex_lock(&clients_mtx);
+	for (int i = 0; i < MAX_CLIENTS; ++i) {
+		if (clients[i]) {
+			send(clients[i]->fd, msg, strlen(msg), 0);
+		}
 	}
-
-	close(clisockfd);
-	//-------------------------------
-
-	return NULL;
+	pthread_mutex_unlock(&clients_mtx);
 }
+
+void register_client(client_t *c)
+{
+	pthread_mutex_lock(&clients_mtx);
+	for (int i = 0; i < MAX_CLIENTS; ++i) {
+		if (!clients[i]) {
+			clients[i] = c;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&clients_mtx);
+}
+
+void deregister_client(&clients_mtx)
+{
+	pthread_mutex_lock(&clients_mtx);
+	for (int i = 0; i < MAX_CLIENTS; ++i) {
+		if (clients[i] == c) {
+			clients[i] = NULL;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&clients_mtx);
+}
+
+void *handle_client(void *arg)
+{
+	client_t *cli = (client_t *)arg;
+	char buf[MSG_LEN];
+	int n;
+
+	// recieve usernames
+	send(cli->fd, "Type username:", 21, 0);
+	n = recv(cli->fd, buf, NAME_LEN - 1, 0);
+	if (n <= 0) {
+		close(cli->fd);
+		free(cli);
+		return NULL;
+	}
+	buf[n] = '\0';
+	strncpy(cli->name, buf, NAME_LEN);
+
+	//color assign
+	cli->color = 31 + (rand() % 7);
+
+	//broadcast join
+	register_client(cli);
+	snprintf(buf, sizeof(buf), "\033[1;%dm%s joined the chat!\n\033[0m", cli->color, cli->name);
+	broadcast(buf);
+
+	while ((n = recv(cli->fd, buf, MSG_LEN - 1, 0)) > 0) {
+		buf[n] = '\0';
+		char out[MSG_LEN + NAME_LEN + 16];
+		snprintf(out, sizeof(out), "\033[1;%dm[%s]\033[0m: %s", cli->color, cli->name, buf);
+		broadcast(out);
+	}
+	snprintf(buf, sizeof(buf), "\033[1;%dm%s left the chat!\n\033[0m", cli->color, cli->name);
+	broadcast(buf);
+	deregister_client(cli);
+
+	close(cli->fd);
+	free(cli);
+	return NULL;
+
+
+}
+
+// void* thread_main(void* args)
+// {
+// 	// make sure thread resources are deallocated upon return
+// 	pthread_detach(pthread_self());
+
+// 	// get socket descriptor from argument
+// 	int clisockfd = ((ThreadArgs*) args)->clisockfd;
+// 	free(args);
+
+// 	//-------------------------------
+// 	// Now, we receive/send messages
+// 	char buffer[256];
+// 	int nsen, nrcv;
+
+// 	nrcv = recv(clisockfd, buffer, 256, 0);
+// 	if (nrcv < 0) error("ERROR recv() failed");
+
+// 	while (nrcv > 0) {
+// 		nsen = send(clisockfd, buffer, nrcv, 0);
+// 		if (nsen != nrcv) error("ERROR send() failed");
+
+// 		nrcv = recv(clisockfd, buffer, 256, 0);
+// 		if (nrcv < 0) error("ERROR recv() failed");
+// 	}
+
+// 	close(clisockfd);
+// 	//-------------------------------
+
+// 	return NULL;
+// }
 
 int main(int argc, char *argv[])
 {
@@ -78,16 +164,29 @@ int main(int argc, char *argv[])
 
 		printf("Connected: %s\n", inet_ntoa(cli_addr.sin_addr));
 
-		// prepare ThreadArgs structure to pass client socket
-		ThreadArgs* args = (ThreadArgs*) malloc(sizeof(ThreadArgs));
-		if (args == NULL) error("ERROR creating thread argument");
-		
-		args->clisockfd = newsockfd;
+		client_t *cli = malloc(sizeof(client_t));
+		if (!cli) error ("malloc");
+		cli->fd = newsockfd;
 
 		pthread_t tid;
-		if (pthread_create(&tid, NULL, thread_main, (void*) args) != 0) error("ERROR creating a new thread");
+		if (pthread_create(&tid, NULL, handle_client, cli)!=0)
+		{
+			perror("pthread_create");
+			close(newsockfd);
+			free(cli);
+		}
+
+		// prepare ThreadArgs structure to pass client socket
+		// ThreadArgs* args = (ThreadArgs*) malloc(sizeof(ThreadArgs));
+		// if (args == NULL) error("ERROR creating thread argument");
+		
+		// args->clisockfd = newsockfd;
+
+		// pthread_t tid;
+		// if (pthread_create(&tid, NULL, thread_main, (void*) args) != 0) error("ERROR creating a new thread");
 	}
 
+	close(sockfd);
 	return 0; 
 }
 
