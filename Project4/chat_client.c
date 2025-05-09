@@ -8,6 +8,8 @@
 #include <netdb.h> 
 
 #define PORT_NUM 1004
+#define NAME_LEN 32
+#define MSG_LEN 512
 
 void error(const char *msg)
 {
@@ -17,7 +19,7 @@ void error(const char *msg)
 
 int main(int argc, char *argv[])
 {
-	if (argc < 2) error("Please speicify hostname");
+	if (argc < 2) error("Please specify hostname");
 
 	int sockfd = socket(AF_INET, SOCK_STREAM, 0);
 	if (sockfd < 0) error("ERROR opening socket");
@@ -38,17 +40,30 @@ int main(int argc, char *argv[])
 			(struct sockaddr *) &serv_addr, slen);
 	if (status < 0) error("ERROR connecting");
 
+
 	char buffer[256];
 	int n;
+
+	memset(buffer, 0, sizeof(buffer));
+	n = recv(sockfd, buffer, sizeof(buffer)-1, 0);
+	if (n < 0) error("error msg");
+	buffer[n] ='\0';
+	printf("%s", buffer);
+
+	memset(buffer, 0, sizeof(buffer));
+	if (!fgets(buffer, 255, stdin)) exit(0);
+	buffer[strcspn(buffer, "\n")] ='\0';
+	n = send(sockfd, buffer, strlen(buffer), 0);
+	if (n < 0) error("username error");
 
 	while (1) {
 		printf("Please enter the message: ");
 		memset(buffer, 0, 256);
 		fgets(buffer, 255, stdin);
-
+		
+		// have message of length 1. so, you want to remove that
 		// since fgets() considers '\n' as a valid character,
 		// even if you type nothing and enter, you will still
-		// have message of length 1. so, you want to remove that
 		if (strlen(buffer) == 1) buffer[0] = '\0';
 
 		n = send(sockfd, buffer, strlen(buffer), 0);

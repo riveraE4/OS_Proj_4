@@ -8,6 +8,7 @@
 #include <arpa/inet.h>
 #include <pthread.h>
 
+
 #define PORT_NUM 1004
 #define NAME_LEN 32
 #define MAX_CLIENTS 10
@@ -26,7 +27,7 @@ typedef struct _ThreadArgs {
 } ThreadArgs;
 
 //client list and mutex
-static client_t *clients[MAX_CLIENTS] = {0};
+static ThreadArgs *clients[MAX_CLIENTS] = {0};
 static pthread_mutex_t clients_mtx = PTHREAD_MUTEX_INITIALIZER;
 
 void broadcast(const char *msg) //broadcasting a message to all clients
@@ -34,13 +35,13 @@ void broadcast(const char *msg) //broadcasting a message to all clients
 	pthread_mutex_lock(&clients_mtx);
 	for (int i = 0; i < MAX_CLIENTS; ++i) {
 		if (clients[i]) {
-			send(clients[i]->fd, msg, strlen(msg), 0);
+			send(clients[i]->clisockfd, msg, strlen(msg), 0);
 		}
 	}
 	pthread_mutex_unlock(&clients_mtx);
 }
 
-void register_client(client_t *c)
+void register_client(ThreadArgs *c)
 {
 	pthread_mutex_lock(&clients_mtx);
 	for (int i = 0; i < MAX_CLIENTS; ++i) {
@@ -50,9 +51,14 @@ void register_client(client_t *c)
 		}
 	}
 	pthread_mutex_unlock(&clients_mtx);
+	printf("Connected Users: ");
+	for ( int i = 0; i < MAX_CLIENTS; i++) {
+		if (clients[i]) printf(" %s", clients[i]->name);
+	}
+	printf("\n");
 }
 
-void deregister_client(&clients_mtx)
+void deregister_client(ThreadArgs *c)
 {
 	pthread_mutex_lock(&clients_mtx);
 	for (int i = 0; i < MAX_CLIENTS; ++i) {
@@ -62,19 +68,26 @@ void deregister_client(&clients_mtx)
 		}
 	}
 	pthread_mutex_unlock(&clients_mtx);
+	printf("Connected Users: ");
+	for ( int i = 0; i < MAX_CLIENTS; i++) {
+		if (clients[i]) printf(" %s", clients[i]->name);
+	}
+	printf("\n");
 }
 
 void *handle_client(void *arg)
 {
-	client_t *cli = (client_t *)arg;
+	pthread_detach(pthread_self());
+	ThreadArgs *cli = (ThreadArgs *)arg;
 	char buf[MSG_LEN];
 	int n;
 
 	// recieve usernames
-	send(cli->fd, "Type username:", 21, 0);
-	n = recv(cli->fd, buf, NAME_LEN - 1, 0);
+	const char *ask = "Type username: ";
+	send(cli->clisockfd, ask, strlen(ask), 0);
+	n = recv(cli->clisockfd, buf, NAME_LEN - 1, 0);
 	if (n <= 0) {
-		close(cli->fd);
+		close(cli->clisockfd);
 		free(cli);
 		return NULL;
 	}
@@ -89,7 +102,7 @@ void *handle_client(void *arg)
 	snprintf(buf, sizeof(buf), "\033[1;%dm%s joined the chat!\n\033[0m", cli->color, cli->name);
 	broadcast(buf);
 
-	while ((n = recv(cli->fd, buf, MSG_LEN - 1, 0)) > 0) {
+	while ((n = recv(cli->clisockfd, buf, MSG_LEN - 1, 0)) > 0) {
 		buf[n] = '\0';
 		char out[MSG_LEN + NAME_LEN + 16];
 		snprintf(out, sizeof(out), "\033[1;%dm[%s]\033[0m: %s", cli->color, cli->name, buf);
@@ -99,7 +112,7 @@ void *handle_client(void *arg)
 	broadcast(buf);
 	deregister_client(cli);
 
-	close(cli->fd);
+	close(cli->clisockfd);
 	free(cli);
 	return NULL;
 
@@ -139,6 +152,7 @@ void *handle_client(void *arg)
 
 int main(int argc, char *argv[])
 {
+	srand(time(NULL));
 	int sockfd = socket(AF_INET, SOCK_STREAM, 0);
 	if (sockfd < 0) error("ERROR opening socket");
 
@@ -164,9 +178,9 @@ int main(int argc, char *argv[])
 
 		printf("Connected: %s\n", inet_ntoa(cli_addr.sin_addr));
 
-		client_t *cli = malloc(sizeof(client_t));
+		ThreadArgs *cli = malloc(sizeof(ThreadArgs));
 		if (!cli) error ("malloc");
-		cli->fd = newsockfd;
+		cli->clisockfd = newsockfd;
 
 		pthread_t tid;
 		if (pthread_create(&tid, NULL, handle_client, cli)!=0)
