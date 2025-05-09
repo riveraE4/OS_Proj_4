@@ -10,31 +10,43 @@
 #include <errno.h>
 #include <time.h>
 #include <signal.h>
-#include <fcntl.h>
 
-#define PORT_NUM 1004
-#define NAME_LEN 32
-#define MAX_CLIENTS 10
-#define MSG_LEN 512
+#define PORT_NUM     1004
+#define NAME_LEN     32
+#define MSG_LEN      512
+#define MAX_CLIENTS  20    // max total clients
+#define MAX_ROOMS    10    // max rooms supported
 
-void error(const char *msg)
-{
+void error(const char *msg) {
     perror(msg);
     exit(1);
 }
 
-typedef struct _ThreadArgs {
-    int clisockfd; 
-    char name[NAME_LEN]; // storing of username
-    int color; // Ansi color code
-    int valid; // Flag to track if socket is valid
+typedef struct {
+    int  clisockfd;
+    char name[NAME_LEN];
+    int  color;
+    int  valid;
+    char ip[INET_ADDRSTRLEN];
+    int  room_id;
 } ThreadArgs;
 
-//client list and mutex
 static ThreadArgs *clients[MAX_CLIENTS] = {0};
 static pthread_mutex_t clients_mtx = PTHREAD_MUTEX_INITIALIZER;
 
-// Ignore SIGPIPE signals to prevent program termination
+//─── Utility: print all connected users ───────────────────────────────────────
+void print_connected_users() {
+    printf("Connected Users:");
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        ThreadArgs *c = clients[i];
+        if (c && c->valid) {
+            printf(" %s(%s)[room %d]", c->name, c->ip, c->room_id);
+        }
+    }
+    printf("\n");
+}
+
+//─── Ignore SIGPIPE so send() errors don’t kill us ─────────────────────────────
 void setup_signal_handler() {
     struct sigaction sa;
     sa.sa_handler = SIG_IGN;
@@ -43,227 +55,227 @@ void setup_signal_handler() {
     sigaction(SIGPIPE, &sa, NULL);
 }
 
-// Function to safely send data to a socket
+//─── Safe send to avoid SIGPIPE crashes ───────────────────────────────────────
 int safe_send(int sockfd, const char *msg, size_t len) {
     if (sockfd < 0) return -1;
-    
-    // Try to send with NOSIGNAL to prevent SIGPIPE
     int ret = send(sockfd, msg, len, MSG_NOSIGNAL);
     if (ret < 0) {
-        printf("Send error: %s (errno=%d)\n", strerror(errno), errno);
+        fprintf(stderr, "send() to fd %d failed: %s\n", sockfd, strerror(errno));
     }
     return ret;
 }
 
-// Print connected users (for server logs)
-void print_connected_users() 
-{
-    printf("Connected Users: ");
+//─── Check if any client occupies the given room ──────────────────────────────
+int room_has_clients(int room_id) {
     for (int i = 0; i < MAX_CLIENTS; i++) {
-        if (clients[i] && clients[i]->valid) printf(" %s", clients[i]->name);
+        ThreadArgs *c = clients[i];
+        if (c && c->valid && c->room_id == room_id)
+            return 1;
     }
-    printf("\n");
+    return 0;
 }
 
-void broadcast(const char *msg) //broadcasting a message to all clients
-{
-    pthread_mutex_lock(&clients_mtx);
-    for (int i = 0; i < MAX_CLIENTS; ++i) {
-        if (clients[i] && clients[i]->valid) {
-            // Try to send, if it fails, mark this client for removal
-            if (safe_send(clients[i]->clisockfd, msg, strlen(msg)) < 0) {
-                printf("Failed to send to client %s\n", clients[i]->name);
-                clients[i]->valid = 0;
-            }
-        }
+//─── Find the lowest free room ID in [1..MAX_ROOMS] ───────────────────────────
+int allocate_new_room() {
+    for (int r = 1; r <= MAX_ROOMS; r++) {
+        if (!room_has_clients(r)) return r;
     }
-    
-    // Clean up invalid clients
-    for (int i = 0; i < MAX_CLIENTS; ++i) {
-        if (clients[i] && !clients[i]->valid) {
-            printf("Cleaning up invalid client: %s\n", clients[i]->name);
-            close(clients[i]->clisockfd);
-            free(clients[i]);
-            clients[i] = NULL;
-        }
-    }
-    pthread_mutex_unlock(&clients_mtx);
+    return -1;
 }
 
-void register_client(ThreadArgs *c)
-{
+//─── Add client to global list & print users ──────────────────────────────────
+void register_client(ThreadArgs *c) {
     pthread_mutex_lock(&clients_mtx);
-    int added = 0;
-    for (int i = 0; i < MAX_CLIENTS; ++i) {
+    for (int i = 0; i < MAX_CLIENTS; i++) {
         if (!clients[i]) {
             clients[i] = c;
-            added = 1;
             break;
         }
     }
     pthread_mutex_unlock(&clients_mtx);
-    
-    if (!added) {
-        printf("WARNING: Maximum clients reached, couldn't add %s\n", c->name);
-        // Send a message to the client and close connection
-        const char *msg = "Server is full, try again later.\n";
-        safe_send(c->clisockfd, msg, strlen(msg));
-        close(c->clisockfd);
-        free(c);
-        return;
-    }
-    
+
     print_connected_users();
 }
 
-void deregister_client(ThreadArgs *c)
-{
+//─── Remove client from global list & print users ─────────────────────────────
+void deregister_client(ThreadArgs *c) {
     pthread_mutex_lock(&clients_mtx);
-    for (int i = 0; i < MAX_CLIENTS; ++i) {
+    for (int i = 0; i < MAX_CLIENTS; i++) {
         if (clients[i] == c) {
             clients[i] = NULL;
             break;
         }
     }
     pthread_mutex_unlock(&clients_mtx);
+
     print_connected_users();
 }
 
-void *handle_client(void *arg)
-{
-    pthread_detach(pthread_self());
-    ThreadArgs *cli = (ThreadArgs *)arg;
-    char buf[MSG_LEN];
-    int n;
-
-    // Initialize client
-    cli->valid = 1;
-    memset(cli->name, 0, NAME_LEN);
-    strcpy(cli->name, "Anonymous"); // Default name in case user disconnects early
-
-    // Send welcome message and request username
-    const char *ask = "Type username: ";
-    if (safe_send(cli->clisockfd, ask, strlen(ask)) < 0) {
-        printf("Error sending username prompt\n");
-        close(cli->clisockfd);
-        free(cli);
-        return NULL;
-    }
-    
-    // Wait for username
-    n = recv(cli->clisockfd, buf, NAME_LEN - 1, 0);
-    if (n <= 0) {
-        printf("Client disconnected during username entry\n");
-        close(cli->clisockfd);
-        free(cli);
-        return NULL;
-    }
-    
-    // Process username
-    buf[n] = '\0';
-    if (strlen(buf) > 0) {
-        // Remove any trailing newline
-        if (buf[strlen(buf)-1] == '\n') {
-            buf[strlen(buf)-1] = '\0';
-        }
-        strncpy(cli->name, buf, NAME_LEN - 1);
-        cli->name[NAME_LEN - 1] = '\0'; // Ensure null termination
-    }
-    
-    // Assign color and register
-    cli->color = 31 + (rand() % 7);
-    register_client(cli);
-    
-    // Create welcome message with a newline at the end
-    snprintf(buf, sizeof(buf), "\033[1;%dm%s joined the chat!\033[0m\n", cli->color, cli->name);
-    broadcast(buf);
-
-    // Main message processing loop
-    while (1) {
-        n = recv(cli->clisockfd, buf, MSG_LEN - 1, 0);
-        if (n <= 0) {
-            if (n < 0) {
-                printf("Error receiving from %s: %s\n", cli->name, strerror(errno));
-            } else {
-                printf("Client %s disconnected\n", cli->name);
+//─── Broadcast a message to everyone in the same room ─────────────────────────
+void broadcast_room(const char *msg, int room_id) {
+    pthread_mutex_lock(&clients_mtx);
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        ThreadArgs *c = clients[i];
+        if (c && c->valid && c->room_id == room_id) {
+            if (safe_send(c->clisockfd, msg, strlen(msg)) < 0) {
+                c->valid = 0;
             }
-            break;
         }
-        
-        buf[n] = '\0';
-        
-        // Add newline if not present
-        char out[MSG_LEN + NAME_LEN + 32];
-        if (buf[strlen(buf)-1] != '\n') {
-            snprintf(out, sizeof(out), "\033[1;%dm[%s]\033[0m: %s\n", cli->color, cli->name, buf);
-        } else {
-            snprintf(out, sizeof(out), "\033[1;%dm[%s]\033[0m: %s", cli->color, cli->name, buf);
-        }
-        
-        broadcast(out);
     }
-    
-    // Announce departure
-    snprintf(buf, sizeof(buf), "\033[1;%dm%s left the chat!\033[0m\n", cli->color, cli->name);
-    broadcast(buf);
-    
-    // Clean up this client
+    // clean up disconnected
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        ThreadArgs *c = clients[i];
+        if (c && !c->valid) {
+            close(c->clisockfd);
+            free(c);
+            clients[i] = NULL;
+        }
+    }
+    pthread_mutex_unlock(&clients_mtx);
+}
+
+//─── Per-client thread: handle username, chat, join/leave ────────────────────
+void *handle_client(void *arg) {
+    pthread_detach(pthread_self());
+    ThreadArgs *cli = arg;
+    char buf[MSG_LEN];
+    int  n;
+
+    cli->valid = 1;
+    strcpy(cli->name, "Anonymous");
+
+    // ask for username
+    safe_send(cli->clisockfd, "Type your user name: ", 21);
+
+    // receive username
+    n = recv(cli->clisockfd, buf, NAME_LEN - 1, 0);
+    if (n <= 0) goto CLEANUP;
+    buf[n] = '\0';
+    if (buf[n-1] == '\n') buf[n-1] = '\0';
+    strncpy(cli->name, buf, NAME_LEN - 1);
+
+    // pick a random ANSI color
+    cli->color = 31 + (rand() % 7);
+
+    // register & announce join
+    register_client(cli);
+    snprintf(buf, sizeof(buf),
+        "\033[1;%dm%s (%s) joined room %d!\033[0m\n",
+        cli->color, cli->name, cli->ip, cli->room_id);
+    broadcast_room(buf, cli->room_id);
+
+    // chat loop
+    while ((n = recv(cli->clisockfd, buf, MSG_LEN - 1, 0)) > 0) {
+        buf[n] = '\0';
+        char out[MSG_LEN + 64];
+        if (buf[strlen(buf)-1] != '\n') {
+            snprintf(out, sizeof(out),
+                "\033[1;%dm[%s (%s)]\033[0m %s\n",
+                cli->color, cli->name, cli->ip, buf);
+        } else {
+            snprintf(out, sizeof(out),
+                "\033[1;%dm[%s (%s)]\033[0m %s",
+                cli->color, cli->name, cli->ip, buf);
+        }
+        broadcast_room(out, cli->room_id);
+    }
+
+    // announce leave
+    snprintf(buf, sizeof(buf),
+        "\033[1;%dm%s (%s) left room %d!\033[0m\n",
+        cli->color, cli->name, cli->ip, cli->room_id);
+    broadcast_room(buf, cli->room_id);
+
+CLEANUP:
     deregister_client(cli);
     close(cli->clisockfd);
     free(cli);
     return NULL;
 }
 
-int main(int argc, char *argv[])
-{
-    // Set up signal handler
+//─── Main: set up server, accept room requests, spawn threads ───────────────
+int main() {
+    // disable stdout buffering so prints appear immediately
+    setvbuf(stdout, NULL, _IONBF, 0);
+
     setup_signal_handler();
-    
-    srand(time(NULL));
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0) error("ERROR opening socket");
-    
-    // Set socket option to reuse address
+    srand((unsigned)time(NULL));
+
+    int listenfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (listenfd < 0) error("socket");
+
     int opt = 1;
-    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-        error("ERROR setting socket options");
-    }
+    setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-    struct sockaddr_in serv_addr;
-    socklen_t slen = sizeof(serv_addr);
-    memset((char*) &serv_addr, 0, sizeof(serv_addr));
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_addr.s_addr = INADDR_ANY;    
-    serv_addr.sin_port = htons(PORT_NUM);
+    struct sockaddr_in serv = {0};
+    serv.sin_family      = AF_INET;
+    serv.sin_addr.s_addr = INADDR_ANY;
+    serv.sin_port        = htons(PORT_NUM);
 
-    int status = bind(sockfd, 
-            (struct sockaddr*) &serv_addr, slen);
-    if (status < 0) error("ERROR on binding");
+    if (bind(listenfd, (struct sockaddr*)&serv, sizeof(serv)) < 0)
+        error("bind");
 
-    listen(sockfd, 5);
-    printf("Chat server started on port %d\n", PORT_NUM);
+    listen(listenfd, 5);
+    printf("Server listening on port %d\n", PORT_NUM);
 
-    while(1) {
-        struct sockaddr_in cli_addr;
-        socklen_t clen = sizeof(cli_addr);
-        int newsockfd = accept(sockfd, 
-            (struct sockaddr *) &cli_addr, &clen);
-        if (newsockfd < 0) error("ERROR on accept");
+    while (1) {
+        struct sockaddr_in cliaddr;
+        socklen_t len = sizeof(cliaddr);
+        int fd = accept(listenfd, (struct sockaddr*)&cliaddr, &len);
+        if (fd < 0) continue;
 
-        printf("Connected: %s\n", inet_ntoa(cli_addr.sin_addr));
+        // read initial room request: "new" or "<room#>"
+        char req[16];
+        int r = recv(fd, req, sizeof(req)-1, 0);
+        if (r <= 0) { close(fd); continue; }
+        req[r] = '\0';
+        if (req[r-1]=='\n') req[r-1] = '\0';
 
-        ThreadArgs *cli = malloc(sizeof(ThreadArgs));
-        if (!cli) error("malloc");
-        cli->clisockfd = newsockfd;
+        // allocate and populate ThreadArgs
+        ThreadArgs *cli = calloc(1, sizeof(*cli));
+        cli->clisockfd = fd;
+        inet_ntop(AF_INET, &cliaddr.sin_addr, cli->ip, sizeof(cli->ip));
 
+        // decide room
+        int room_id = -1;
+        if (strcmp(req, "new") == 0) {
+            room_id = allocate_new_room();
+            if (room_id < 0) {
+                safe_send(fd, "Server: no more rooms available\n", 32);
+                close(fd);
+                free(cli);
+                continue;
+            }
+            char resp[64];
+            snprintf(resp, sizeof(resp),
+                "Connected to %s with new room number %d\n",
+                inet_ntoa(cliaddr.sin_addr), room_id);
+            safe_send(fd, resp, strlen(resp));
+        } else {
+            int rid = atoi(req);
+            if (rid < 1 || rid > MAX_ROOMS || !room_has_clients(rid)) {
+                safe_send(fd, "Server: invalid room number\n", 28);
+                close(fd);
+                free(cli);
+                continue;
+            }
+            room_id = rid;
+            char resp[64];
+            snprintf(resp, sizeof(resp),
+                "Connected to %s with room number %d\n",
+                inet_ntoa(cliaddr.sin_addr), room_id);
+            safe_send(fd, resp, strlen(resp));
+        }
+        cli->room_id = room_id;
+
+        // spawn handler thread
         pthread_t tid;
-        if (pthread_create(&tid, NULL, handle_client, cli)!=0) {
-            perror("pthread_create");
-            close(newsockfd);
+        if (pthread_create(&tid, NULL, handle_client, cli) != 0) {
+            close(fd);
             free(cli);
         }
     }
 
-    close(sockfd);
-    return 0; 
+    close(listenfd);
+    return 0;
 }
