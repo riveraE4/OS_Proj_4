@@ -1,5 +1,5 @@
-// chat_server.c
-// Simple multi-room chat server with auto room creation and menu selection
+/* chat_server.c */
+/* Simple multi-room chat server with auto room creation and menu selection */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,32 +12,32 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 
-#define PORT_NUM     15000   // server that is being used to listen on 
-#define NAME_LEN     32      // user name length
-#define MSG_LEN      512     // message length
-#define MAX_CLIENTS  20      // number of  clients
-#define MAX_ROOMS    10      // number of chat room 
+#define PORT_NUM     15000   /* server that is being used to listen on */
+#define NAME_LEN     32      /* user name length */
+#define MSG_LEN      512     /* message length */
+#define MAX_CLIENTS  20      /* number of clients */
+#define MAX_ROOMS    10      /* number of chat room */
 
-// per connection stored data
+/* per connection stored data */
 typedef struct {
-    int  clisockfd;                 
-    char name[NAME_LEN];            
-    int  color;                     // ANSI color code
-    int  valid;                     
-    char ip[INET_ADDRSTRLEN];       
-    int  room_id;                   
+    int  clisockfd;
+    char name[NAME_LEN];
+    int  color;              /* ANSI color code */
+    int  valid;
+    char ip[INET_ADDRSTRLEN];
+    int  room_id;
 } ThreadArgs;
 
 static ThreadArgs *clients[MAX_CLIENTS] = {0};
 static pthread_mutex_t clients_mtx = PTHREAD_MUTEX_INITIALIZER;
 
-// error and exit
+/* error and exit */
 void error(const char *msg) {
     perror(msg);
     exit(1);
 }
 
-// number of active clients in room r
+/* number of active clients in room r */
 int count_clients_in_room(int r) {
     int cnt = 0;
     pthread_mutex_lock(&clients_mtx);
@@ -50,7 +50,7 @@ int count_clients_in_room(int r) {
     return cnt;
 }
 
-// first empty room slot
+/* first empty room slot */
 int allocate_new_room() {
     for (int r = 1; r <= MAX_ROOMS; r++)
         if (count_clients_in_room(r) == 0)
@@ -65,7 +65,7 @@ int safe_send(int fd, const char *msg, size_t len) {
     return n;
 }
 
-// show connected users 
+/* AI Influence: formatted debug list of users with room IDs */
 void print_connected_users() {
     printf("Connected Users:");
     for (int i = 0; i < MAX_CLIENTS; i++) {
@@ -76,7 +76,7 @@ void print_connected_users() {
     printf("\n");
 }
 
-// addition of client to list
+/* addition of client to list */
 void register_client(ThreadArgs *c) {
     pthread_mutex_lock(&clients_mtx);
     for (int i = 0; i < MAX_CLIENTS; i++) {
@@ -86,7 +86,7 @@ void register_client(ThreadArgs *c) {
     print_connected_users();
 }
 
-// removal of client from list
+/* removal of client from list */
 void deregister_client(ThreadArgs *c) {
     pthread_mutex_lock(&clients_mtx);
     for (int i = 0; i < MAX_CLIENTS; i++) {
@@ -96,7 +96,7 @@ void deregister_client(ThreadArgs *c) {
     print_connected_users();
 }
 
-// broadcast a message to everyone in the same room
+/* broadcast a message to everyone in the same room */
 void broadcast_room(const char *msg, int room) {
     pthread_mutex_lock(&clients_mtx);
     for (int i = 0; i < MAX_CLIENTS; i++) {
@@ -107,7 +107,7 @@ void broadcast_room(const char *msg, int room) {
     pthread_mutex_unlock(&clients_mtx);
 }
 
-// client handling
+/* client handling */
 void *handle_client(void *arg) {
     ThreadArgs *cli = arg;
     pthread_detach(pthread_self());
@@ -117,24 +117,25 @@ void *handle_client(void *arg) {
     cli->valid = 1;
     strcpy(cli->name, "Anonymous");
 
-    // Ask for username
+    /* Ask for username */
     safe_send(cli->clisockfd, "Type your user name: ", 21);
+
     n = recv(cli->clisockfd, buf, NAME_LEN - 1, 0);
     if (n > 0) {
         buf[n - 1] = '\0';
         strncpy(cli->name, buf, NAME_LEN - 1);
 
-        // Announce join
         cli->color = 31 + rand() % 7;
         snprintf(buf, sizeof(buf),
                  "\033[1;%dm%s joined room %d\033[0m\n",
                  cli->color, cli->name, cli->room_id);
         broadcast_room(buf, cli->room_id);
 
-        // Chat loop
+        /* Chat loop */
         while ((n = recv(cli->clisockfd, buf, MSG_LEN - 1, 0)) > 0) {
             buf[n] = '\0';
             char out[MSG_LEN + 64];
+            /* AI Influence: ANSI‐colored per‐message formatting */
             snprintf(out, sizeof(out),
                      "\033[1;%dm[%s]\033[0m %s\n",
                      cli->color, cli->name, buf);
@@ -142,7 +143,7 @@ void *handle_client(void *arg) {
         }
     }
 
-    // Announce when a connection leaves
+    /* AI Influence: ANSI‐colored leave announcement */
     snprintf(buf, sizeof(buf),
              "\033[1;%dm%s left room %d\033[0m\n",
              cli->color, cli->name, cli->room_id);
@@ -157,15 +158,15 @@ void *handle_client(void *arg) {
 int main() {
     srand(time(NULL));
 
-    // Create listening socket
+    /* Create listening socket */
     int listenfd = socket(AF_INET, SOCK_STREAM, 0);
     if (listenfd < 0) error("socket");
 
-    // Allow address reuse
+    /* Allow address reuse */
     int opt = 1;
     setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-    // Bind to port
+    /* Bind to port */
     struct sockaddr_in serv = {
         .sin_family = AF_INET,
         .sin_addr.s_addr = INADDR_ANY,
@@ -183,18 +184,18 @@ int main() {
         int fd = accept(listenfd, (struct sockaddr*)&cliaddr, &addrlen);
         if (fd < 0) continue;
 
-        // Initial room request
+        /* Initial room request */
         char req[16] = {0};
         recv(fd, req, sizeof(req) - 1, 0);
         if (req[strlen(req) - 1] == '\n')
             req[strlen(req) - 1] = '\0';
 
-        // Allocate client(s)
+        /* Allocate client(s) */
         ThreadArgs *cli = calloc(1, sizeof(*cli));
         cli->clisockfd = fd;
         strncpy(cli->ip, inet_ntoa(cliaddr.sin_addr), INET_ADDRSTRLEN);
 
-        // Room assignment
+        /* AI Influence: Interactive menu for room selection when no req provided */
         if (req[0] == '\0') {
             int any = 0;
             for (int r = 1; r <= MAX_ROOMS; r++)
@@ -241,6 +242,8 @@ int main() {
                     continue;
                 }
             }
+
+        /* AI Influence: Direct “new” vs. room# handling when req is non-empty */
         } else {
             if (!strcmp(req, "new"))
                 cli->room_id = allocate_new_room();
