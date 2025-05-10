@@ -12,7 +12,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 
-#define PORT_NUM  15000  // server port number
+#define PORT_NUM  "15000"  // server port number
 #define MAXLEN    512        // max messages
 
 static int sockfd;           // socket descriptor
